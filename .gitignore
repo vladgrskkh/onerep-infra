@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+__pycache__/
+*.pyc
+.superpowers/
+.worktrees/
+backups/
+certificates/
+.DS_Store
