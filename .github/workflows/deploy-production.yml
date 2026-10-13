@@ -56,8 +56,8 @@ jobs:
           RESTIC_REPOSITORY: ${{ secrets.RESTIC_REPOSITORY }}
           RESTIC_PASSWORD: ${{ secrets.RESTIC_PASSWORD }}
           RESTIC_CACHE_DIR: /root/.cache/restic
-          RESTIC_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          RESTIC_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           python3 compose/production/scripts/render-env.py \
             --output "$RUNNER_TEMP/onerep.env" \
@@ -83,8 +83,8 @@ jobs:
             --var RESTIC_REPOSITORY \
             --var RESTIC_PASSWORD \
             --var RESTIC_CACHE_DIR \
-            --var RESTIC_S3_ACCESS_KEY \
-            --var RESTIC_S3_SECRET_KEY
+            --var AWS_ACCESS_KEY_ID \
+            --var AWS_SECRET_ACCESS_KEY
 
       - name: Install SSH credentials
         env:

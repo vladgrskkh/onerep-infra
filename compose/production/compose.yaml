@@ -214,6 +214,42 @@ services:
     restart: unless-stopped
     logging: *bounded-logging
 
+  rustfs-backup:
+    image: docker.io/rustfs/rc:v0.1.36@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699
+    profiles: [backup]
+    environment:
+      RUSTFS_ENDPOINT: ${S3_ENDPOINT:?Set S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET}
+      S3_BACKUP_ACCESS_KEY: ${S3_BACKUP_ACCESS_KEY:?Set S3_BACKUP_ACCESS_KEY}
+      S3_BACKUP_SECRET_KEY: ${S3_BACKUP_SECRET_KEY:?Set S3_BACKUP_SECRET_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION}
+      RC_HOST_backup: "http://${S3_BACKUP_ACCESS_KEY}:${S3_BACKUP_SECRET_KEY}@rustfs:9000"
+    entrypoint: ["rc"]
+    volumes:
+      - backup-staging:/backup
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    logging: *bounded-logging
+
+  backup-tools:
+    image: docker.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    profiles: [backup]
+    entrypoint: ["/bin/sh"]
+    command: ["-c", "exit 0"]
+    volumes:
+      - backup-staging:/backup
+      - backup-state:/state
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    logging: *bounded-logging
+
   restic:
     image: docker.io/restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
     profiles: [backup]
@@ -221,8 +257,8 @@ services:
       RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:?Set RESTIC_REPOSITORY}
       RESTIC_PASSWORD: ${RESTIC_PASSWORD:?Set RESTIC_PASSWORD}
       RESTIC_CACHE_DIR: ${RESTIC_CACHE_DIR:-/root/.cache/restic}
-      AWS_ACCESS_KEY_ID: ${RESTIC_S3_ACCESS_KEY:?Set RESTIC_S3_ACCESS_KEY}
-      AWS_SECRET_ACCESS_KEY: ${RESTIC_S3_SECRET_KEY:?Set RESTIC_S3_SECRET_KEY}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION}
     volumes:
       - backup-staging:/backup
@@ -295,6 +331,7 @@ volumes:
   redis-data:
   rustfs-data:
   backup-staging:
+  backup-state:
   restic-cache:
   letsencrypt:
   certbot-lib:

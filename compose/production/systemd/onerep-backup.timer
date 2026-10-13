@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the OneRep offsite backup daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+Unit=onerep-backup.service
+
+[Install]
+WantedBy=timers.target

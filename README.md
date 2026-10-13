@@ -15,7 +15,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Replace both application image tags with the immutable short Git commit tags published by the backend repositories. Generate each database password, the Redis password, the RustFS root secret, both S3 user secrets, the Restic repository password, and the offsite S3 secret with `openssl rand -hex 32`. Set `RESTIC_S3_ACCESS_KEY` to the access key issued by the offsite storage provider. Generate the auth service's RSA signing key with `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out auth-jwt-private.pem`; place its PEM contents in `AUTH_JWT_PRIVATE_KEY` as a quoted multiline value in `.env`. Generate the RustFS root access key with:
+Replace both application image tags with the immutable short Git commit tags published by the backend repositories. Generate each database password, the Redis password, the RustFS root secret, both S3 user secrets, the Restic repository password, and the offsite S3 secret with `openssl rand -hex 32`. Set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` to the credentials issued by the offsite storage provider. Generate the auth service's RSA signing key with `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out auth-jwt-private.pem`; place its PEM contents in `AUTH_JWT_PRIVATE_KEY` as a quoted multiline value in `.env`. Generate the RustFS root access key with:
 
 ```sh
 openssl rand -hex 10 | tr '[:lower:]' '[:upper:]'
@@ -131,17 +131,32 @@ Rotate Redis credentials as a coordinated change: update `.env`, recreate Redis 
 
 ## Backup and restore
 
-The `restic` profile uses separate offsite S3 credentials (`RESTIC_S3_ACCESS_KEY` and `RESTIC_S3_SECRET_KEY`) and an encrypted Restic repository URL. Keep that repository off the application server. The repository must be initialized and a tested backup workflow configured before storing non-disposable media. The pinned `rustfs/rc` image is intended to run ephemerally for object mirroring; do not start an idle CLI container. That mirror uses the dedicated read-only RustFS identity, which can list and read objects only in `gym-media` and cannot write or delete them.
+The `backup` profile contains one-shot Restic, pinned `rustfs/rc`, and filesystem helper clients. Daily backups read `auth_db`, `gym_db`, and the current objects in `gym-media` using the read-only `gym-backup` identity. The host script first measures database and media sizes and checks the Compose staging volume for at least 20% headroom, then writes `pg_dump -Fc` archives, mirrors media into a fresh directory, and records a SHA-256 manifest. The temporary mode-0700 staging directory lives inside the `backup-staging` Docker volume and is removed on every exit path. Restic reads that volume directly and submits the files to the encrypted repository identified by `RESTIC_REPOSITORY`; keep that repository off the application server. `RESTIC_PASSWORD` encrypts the snapshots, while `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` authenticate to the offsite S3 provider. Logs contain operation status only, never credentials.
 
-Before relying on a backup, run a restore drill into a new, empty, uniquely named staging directory or disposable database. For an initialized Restic repository, inspect snapshots and restore a selected snapshot to a fresh target:
+Install and enable the daily timer during server provisioning after `/opt/onerep` and Docker are configured:
 
 ```sh
-docker compose --profile backup --env-file .env -f compose/production/compose.yaml run --rm restic snapshots
-docker compose --profile backup --env-file .env -f compose/production/compose.yaml run --rm \
-  --entrypoint restic restic restore SNAPSHOT_ID --target /backup/restore-check-UNIQUE
+sudo install -m 0644 compose/production/systemd/onerep-backup.service /etc/systemd/system/
+sudo install -m 0644 compose/production/systemd/onerep-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now onerep-backup.timer
+systemctl list-timers onerep-backup.timer
+sudo systemctl start onerep-backup.service
+sudo journalctl -u onerep-backup.service --since today --no-pager
 ```
 
-Verify restored database dumps with `pg_restore --list` and compare object SHA-256 manifests before considering a restore usable. Restore into a separate destination and validate it before any operator-approved recovery; never test restore by overwriting the live PostgreSQL or RustFS volumes. A RustFS object mirror does not by itself preserve IAM policies or bucket configuration, so retain this repository's policy files and the credentials in the protected secret store.
+Run an isolated restore check after initialization and on a regular schedule:
+
+```sh
+sudo /opt/onerep/compose/production/scripts/restore-check.sh --env-file /opt/onerep/.env
+sudo bash compose/production/scripts/test_backup_restore.sh
+```
+
+`restore-check.sh` restores the latest snapshot into a private temporary directory, starts a labeled PostgreSQL container with a temporary filesystem and no network, restores and queries both databases, and checks every media file against the saved manifest. It never mounts the live PostgreSQL or RustFS volumes and never writes to any RustFS bucket.
+
+For disaster recovery, provision a new RustFS destination and create a new, empty bucket there; give the recovery bucket a distinct name. Create a temporary IAM policy scoped to only that bucket (`s3:ListBucket` on its bucket ARN and `s3:GetObject`/`s3:PutObject` on its object ARN), then create a temporary identity and attach only that policy. Give the pinned `rc` client an ephemeral alias for that identity and mirror the verified `media/` directory from the restored snapshot into the new bucket. Mirror the new bucket back to an empty local verification directory and run `sha256sum --check` against the restored `media.sha256` manifest before routing applications to the recovered destination. Disable and revoke the temporary identity, verify that its credentials are denied, and then remove its temporary policy. Keep the production bucket and credentials out of this procedure; never mirror a recovery into the live bucket or use `--remove`.
+
+Do not store non-disposable media until the pilot go/no-go gate passes: observe representative use for seven days with no OOM kills or unexpected restarts; retain at least 512 MiB host `MemAvailable` at peak; keep at least 20% of data-volume capacity free after backup and restore tests; avoid CPU saturation above 80% for more than 15 minutes; and complete one successful off-server backup plus restore. Keep the Restic password and offsite provider credentials in the protected secret store so the encrypted repository can be recovered independently of this server.
 
 ## Pull request validation
 

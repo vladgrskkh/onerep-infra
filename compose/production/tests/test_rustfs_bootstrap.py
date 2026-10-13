@@ -188,8 +188,8 @@ class DisposableComposeIntegrationTests(unittest.TestCase):
                         "AWS_DEFAULT_REGION=us-east-1",
                         "RESTIC_REPOSITORY=s3:https://example.invalid/restic",
                         "RESTIC_PASSWORD=disposable-restic-password",
-                        "RESTIC_S3_ACCESS_KEY=disposable-offsite-access",
-                        "RESTIC_S3_SECRET_KEY=disposable-offsite-secret",
+                        "AWS_ACCESS_KEY_ID=disposable-offsite-access",
+                        "AWS_SECRET_ACCESS_KEY=disposable-offsite-secret",
                     ]
                 )
                 + "\n"

@@ -33,7 +33,13 @@ jobs:
           compose/production/scripts/bootstrap-cert.sh
           compose/production/scripts/deploy.sh
           compose/production/scripts/renew-cert.sh
+          compose/production/scripts/backup.sh
+          compose/production/scripts/restore-check.sh
+          compose/production/scripts/test_backup_restore.sh
           compose/production/postgres/init/01-create-service-databases.sh
+
+      - name: Validate backup systemd units
+        run: systemd-analyze verify compose/production/systemd/onerep-backup.service compose/production/systemd/onerep-backup.timer
 
       - name: Compile environment renderer
         run: python3 -m py_compile compose/production/scripts/render-env.py
@@ -50,3 +56,6 @@ jobs:
 
       - name: Run RustFS bootstrap behavior and disposable integration tests
         run: python3 -m unittest discover -s compose/production/tests -p 'test_*.py' -v
+
+      - name: Run disposable encrypted backup and restore test
+        run: bash compose/production/scripts/test_backup_restore.sh
