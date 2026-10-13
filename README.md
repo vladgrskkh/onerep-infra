@@ -1,9 +1,116 @@
 # OneRep infrastructure
 
-Public deployment configuration and operating runbooks for OneRep.
+This public repository contains the Compose deployment and operating runbook for the OneRep pilot. It uses one PostgreSQL server with separate `auth_db`/`auth_app` and `gym_db`/`gym_app` identities, private Redis and RustFS services, and NGINX at `onerep.mooo.com`. NGINX serves the mobile API bases `https://onerep.mooo.com/auth` and `https://onerep.mooo.com/gym`, and preserves the signed Host, path, and query on `/gym-media/` requests.
 
-The first deployment uses Docker Compose, NGINX, PostgreSQL, Redis, and RustFS on one server. Its public hostname is `onerep.mooo.com`; the mobile client uses the `/auth` and `/gym` API prefixes.
+Configuration examples contain dummy values only. Put real values in the protected GitHub `production` Environment and in an untracked server `.env` file. Deployment is a deliberate operator action; application merges do not deploy automatically.
 
-Deployment is manually triggered through GitHub Actions. Runtime credentials belong in the GitHub `production` Environment and an untracked server `.env` file. This repository contains configuration and dummy examples only.
+## Provision the server
 
-The approved [deployment design](https://github.com/vladgrskkh/gym/blob/main/docs/superpowers/specs/2026-10-12-compose-deployment-design.md) and [implementation plan](https://github.com/vladgrskkh/gym/blob/main/docs/superpowers/plans/2026-10-12-compose-deployment.md) live in the `gym` repository.
+Use a supported Linux host with Docker Engine and the Compose plugin. Point `onerep.mooo.com` at the server, and allow inbound SSH, HTTP, and HTTPS only. Keep PostgreSQL, Redis, application ports, and the RustFS API and console unpublished.
+
+Check out a reviewed infrastructure commit, then create the server environment file:
+
+```sh
+cp .env.example .env
+chmod 600 .env
+```
+
+Replace both application image tags with the immutable short Git commit tags published by the backend repositories. Generate each database password, the Redis password, the RustFS root secret, both S3 user secrets, the Restic repository password, and the offsite S3 secret with `openssl rand -hex 32`. Set `RESTIC_S3_ACCESS_KEY` to the access key issued by the offsite storage provider. Generate the auth service's RSA signing key with `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out auth-jwt-private.pem`; place its PEM contents in `AUTH_JWT_PRIVATE_KEY` as a quoted multiline value in `.env`. Generate the RustFS root access key with:
+
+```sh
+openssl rand -hex 10 | tr '[:lower:]' '[:upper:]'
+```
+
+That produces the required 20 uppercase hexadecimal characters. Keep the fixed S3 access keys as `gym-api` and `gym-backup`. Generate the auth signing key in the format expected by the auth service, and set a real certificate contact email. Never put generated values in shell commands, CI logs, source control, or this public repository. Do not pass the entire `.env` file to containers: Compose maps only each service's required values.
+
+Validate the file and Compose model before starting services:
+
+```sh
+docker compose --env-file .env -f compose/production/compose.yaml config --quiet
+```
+
+## First deployment
+
+Start the private data services and wait for their health checks:
+
+```sh
+docker compose --env-file .env -f compose/production/compose.yaml up -d postgres redis rustfs
+docker compose --env-file .env -f compose/production/compose.yaml ps
+```
+
+Run the idempotent RustFS bucket and IAM bootstrap. It creates `gym-media`, the exact checked-in API and read-only backup policies, and the fixed IAM users. It verifies each credential with signed identity lookup and allowed object operations. If a password or policy has drifted, it stops and preserves the existing state; rotate deliberately, update `.env`, then rerun.
+
+```sh
+docker compose --profile bootstrap --env-file .env -f compose/production/compose.yaml run --rm rustfs-bootstrap
+```
+
+Initialize the public HTTP challenge endpoint, then request the first certificate:
+
+```sh
+docker compose --profile bootstrap --env-file .env -f compose/production/compose.yaml up -d nginx-bootstrap
+docker compose --profile certificate --env-file .env -f compose/production/compose.yaml run --rm certbot \
+  certonly --webroot --webroot-path /var/www/certbot \
+  -d onerep.mooo.com --email operator@example.com --agree-tos --non-interactive
+docker compose --profile bootstrap --env-file .env -f compose/production/compose.yaml stop nginx-bootstrap
+```
+
+Replace the example email with the same real value set in `.env`. Run each service's migrations independently, then start the API services and TLS NGINX:
+
+```sh
+docker compose --env-file .env -f compose/production/compose.yaml run --rm migrate-auth
+docker compose --env-file .env -f compose/production/compose.yaml run --rm migrate-gym
+docker compose --profile production --env-file .env -f compose/production/compose.yaml up -d auth gym-api nginx
+```
+
+The database initialization script runs only when PostgreSQL starts with a new data volume. On an existing volume it does not create or rotate roles. To rotate a database password, connect as the PostgreSQL administrator, use `\password auth_app` or `\password gym_app` interactively, update the matching `.env` value, and recreate the matching migration and application containers. Do not put a password in the `psql` command line.
+
+## Health, logs, and capacity
+
+Check service health and recent logs after startup:
+
+```sh
+docker compose --env-file .env -f compose/production/compose.yaml ps
+docker compose --env-file .env -f compose/production/compose.yaml logs --tail=100 postgres redis rustfs auth gym-api nginx
+docker stats
+df -h
+docker system df
+```
+
+Every long-running service has a health check, restart policy, and bounded `json-file` logs (10 MB per file, three files). RustFS uses stdout-only application logging with an empty log directory and empty OTLP endpoints; its stdout and stderr are captured by Docker's rotating log driver. Watch both Docker storage and the host filesystem, especially PostgreSQL, RustFS, and backup staging. Avoid automatic prune commands: they can remove image layers needed for rollback.
+
+Renew certificates with the `certbot` service on an operator schedule. After a renewal, reload NGINX so it reads the new certificate:
+
+```sh
+docker compose --profile certificate --env-file .env -f compose/production/compose.yaml run --rm certbot
+docker compose --profile production --env-file .env -f compose/production/compose.yaml exec nginx nginx -s reload
+```
+
+## Image updates and rollback
+
+Use immutable application commit tags and the exact upstream tags and registry digests recorded in `compose/production/compose.yaml`. Review an upstream release and its digest before changing either. Update `.env`, validate the rendered Compose model, pull the selected images, and recreate only the affected services. Keep the previous immutable tags recorded so rollback is a tag change followed by recreation. Database migrations may not be reversible; review the backend migration history before rolling an application image back.
+
+## Credential rotation
+
+Keep PostgreSQL administrator credentials confined to PostgreSQL and one-shot administration. App and migration containers receive only their database role credentials. Redis, RustFS root, API S3, backup S3, and Restic credentials are likewise limited to their consumers. The RustFS root identity is available only to the server and one-shot bootstrap/admin containers; the API and Restic backup service never receive it.
+
+RustFS bootstrap intentionally rejects a changed secret for an existing IAM user because the secret cannot be read back for comparison. Use a reviewed RustFS administrative credential-rotation procedure to update the existing `gym-api` or `gym-backup` user in place while preserving its exact policy and fixed access key. Update the matching protected production secret and server `.env` value together, recreate the consuming service, then rerun bootstrap to verify the new credential. Do not delete and recreate a user as an automatic repair. If the stored policy differs, review the access change explicitly before applying the checked-in policy.
+
+Rotate Redis credentials as a coordinated change: update `.env`, recreate Redis and both applications, then confirm all health checks. For JWT signing key rotation, account for existing tokens and client key discovery before replacing the stable key. Restrict and audit access to the server `.env`; remove retired secrets from the active secret store only after consumers are confirmed healthy.
+
+## Backup and restore
+
+The `restic` profile uses separate offsite S3 credentials (`RESTIC_S3_ACCESS_KEY` and `RESTIC_S3_SECRET_KEY`) and an encrypted Restic repository URL. Keep that repository off the application server. The repository must be initialized and a tested backup workflow configured before storing non-disposable media. The pinned `rustfs/rc` image is intended to run ephemerally for object mirroring; do not start an idle CLI container. That mirror uses the dedicated read-only RustFS identity, which can list and read objects only in `gym-media` and cannot write or delete them.
+
+Before relying on a backup, run a restore drill into a new, empty, uniquely named staging directory or disposable database. For an initialized Restic repository, inspect snapshots and restore a selected snapshot to a fresh target:
+
+```sh
+docker compose --profile backup --env-file .env -f compose/production/compose.yaml run --rm restic snapshots
+docker compose --profile backup --env-file .env -f compose/production/compose.yaml run --rm \
+  --entrypoint restic restic restore SNAPSHOT_ID --target /backup/restore-check-UNIQUE
+```
+
+Verify restored database dumps with `pg_restore --list` and compare object SHA-256 manifests before considering a restore usable. Restore into a separate destination and validate it before any operator-approved recovery; never test restore by overwriting the live PostgreSQL or RustFS volumes. A RustFS object mirror does not by itself preserve IAM policies or bucket configuration, so retain this repository's policy files and the credentials in the protected secret store.
+
+## Pull request validation
+
+The public validation workflow receives no production credentials. It checks the Compose model, workflow syntax, shell scripts, NGINX bootstrap configuration, and runs the RustFS bootstrap tests against a uniquely named disposable Compose project and volume set.

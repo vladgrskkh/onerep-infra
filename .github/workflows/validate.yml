@@ -1,0 +1,42 @@
+name: validate infrastructure
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Compose model
+        run: docker compose --profile '*' --env-file .env.example -f compose/production/compose.yaml config --quiet
+
+      - name: Lint workflow syntax
+        run: >-
+          docker run --rm -v "$PWD:/work:ro" -w /work
+          docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          .github/workflows/validate.yml
+
+      - name: Lint shell scripts
+        run: >-
+          docker run --rm -v "$PWD:/mnt:ro" -w /mnt
+          docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+          compose/production/scripts/bootstrap-rustfs.sh
+          compose/production/postgres/init/01-create-service-databases.sh
+
+      - name: Check NGINX bootstrap configuration
+        run: >-
+          docker run --rm --entrypoint nginx
+          -v "$PWD/compose/production/nginx/bootstrap.conf:/etc/nginx/conf.d/default.conf:ro"
+          docker.io/library/nginx:1.30.5-alpine3.24@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+          -t
+
+      - name: Run RustFS bootstrap behavior and disposable integration tests
+        run: python3 -m unittest discover -s compose/production/tests -p 'test_*.py' -v
