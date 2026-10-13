@@ -14,6 +14,7 @@ import unittest
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qsl, quote, urlsplit
 
 
@@ -51,9 +52,18 @@ class NginxRoutingIntegrationTests(unittest.TestCase):
         if probe.returncode != 0:
             raise unittest.SkipTest("Docker Compose is unavailable")
         cls.project = f"ngrt-{uuid.uuid4().hex[:16]}"
+        if not re.fullmatch(r"ngrt-[0-9a-f]{16}", cls.project):
+            raise RuntimeError("Invalid disposable Compose project name")
         cls.temp = tempfile.TemporaryDirectory(prefix=f"{cls.project}-")
         cls.directory = Path(cls.temp.name)
         cls.compose_file = cls.directory / "compose.yaml"
+        cls.compose = [
+            "docker", "compose", "--project-name", cls.project,
+            "-f", str(cls.compose_file),
+        ]
+        cls.network = f"{cls.project}_default"
+        cls.addClassCleanup(cls._cleanup_disposable_project)
+
         cls.payload = cls.directory / "payload.bin"
         cls.payload.write_bytes(bytes(range(256)) * 8192)  # 2 MiB, over NGINX's default.
         cls.small_payload = cls.directory / "small-payload.bin"
@@ -71,10 +81,6 @@ class NginxRoutingIntegrationTests(unittest.TestCase):
         ])
         cls._write_echo_server()
         cls._write_compose()
-        cls.compose = [
-            "docker", "compose", "--project-name", cls.project,
-            "-f", str(cls.compose_file),
-        ]
         cls._run([*cls.compose, "up", "-d"])
         cls._wait_for("rustfs", "http://rustfs:9000/health/ready")
         bucket_url = cls._presigned_url_for_setup("/gym-media", "PUT")
@@ -88,28 +94,28 @@ class NginxRoutingIntegrationTests(unittest.TestCase):
             "nginx-bootstrap",
             "http://nginx-bootstrap:8080/.well-known/acme-challenge/task5-probe",
         )
-        cls.network = f"{cls.project}_default"
 
     @classmethod
-    def tearDownClass(cls) -> None:
-        if not hasattr(cls, "compose"):
-            if hasattr(cls, "temp"):
-                cls.temp.cleanup()
-            return
+    def _cleanup_disposable_project(cls) -> None:
         try:
+            if not re.fullmatch(r"ngrt-[0-9a-f]{16}", cls.project):
+                raise RuntimeError("Refusing cleanup outside the unique NGINX test project")
+            if not cls.compose_file.exists():
+                return
             result = subprocess.run(
                 [*cls.compose, "ps", "-aq"], capture_output=True, text=True, check=False
             )
-            if result.returncode == 0:
-                for container_id in result.stdout.split():
-                    inspected = subprocess.run(
-                        ["docker", "inspect", "--format",
-                         '{{ index .Config.Labels "com.docker.compose.project" }}',
-                         container_id],
-                        capture_output=True, text=True, check=False,
-                    )
-                    if inspected.returncode != 0 or inspected.stdout.strip() != cls.project:
-                        raise RuntimeError("Refusing cleanup outside the unique test project")
+            if result.returncode != 0:
+                raise RuntimeError("Unable to validate the disposable Compose project")
+            for container_id in result.stdout.split():
+                inspected = subprocess.run(
+                    ["docker", "inspect", "--format",
+                     '{{ index .Config.Labels "com.docker.compose.project" }}',
+                     container_id],
+                    capture_output=True, text=True, check=False,
+                )
+                if inspected.returncode != 0 or inspected.stdout.strip() != cls.project:
+                    raise RuntimeError("Refusing cleanup outside the unique test project")
             cleanup = subprocess.run(
                 [*cls.compose, "down", "--volumes", "--remove-orphans"],
                 capture_output=True, text=True, check=False,
@@ -496,6 +502,60 @@ volumes:
         start = output.index("{")
         value, _ = json.JSONDecoder().raw_decode(output[start:])
         return value
+
+
+class NginxSetupFailureCleanupTests(unittest.TestCase):
+    def test_partial_compose_start_is_cleaned_when_class_setup_fails(self) -> None:
+        calls: list[list[str]] = []
+        project_labels: dict[str, str] = {}
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command[:3] == ["docker", "compose", "version"]:
+                return subprocess.CompletedProcess(command, 0, "Docker Compose\n", "")
+            if command and command[0] == "openssl":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if command[:2] == ["docker", "compose"] and "up" in command:
+                return subprocess.CompletedProcess(command, 1, "", "simulated partial startup")
+            if command[:2] == ["docker", "compose"] and "ps" in command:
+                project = command[command.index("--project-name") + 1]
+                project_labels["project"] = project
+                return subprocess.CompletedProcess(command, 0, "container-id\n", "")
+            if command[:2] == ["docker", "inspect"]:
+                return subprocess.CompletedProcess(
+                    command, 0, project_labels["project"] + "\n", ""
+                )
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        def setup_failure(self) -> None:
+            return None
+
+        probe = type(
+            "NginxSetupFailureProbe",
+            (NginxRoutingIntegrationTests,),
+            {"test_setup_failure_marker": setup_failure},
+        )
+        suite = unittest.TestSuite([probe("test_setup_failure_marker")])
+        result = unittest.TestResult()
+        with patch("shutil.which", return_value="/usr/bin/docker"), patch(
+            "subprocess.run", side_effect=fake_run
+        ):
+            try:
+                suite.run(result)
+            finally:
+                if hasattr(probe, "temp"):
+                    probe.temp.cleanup()
+
+        self.assertEqual(len(result.errors), 1)
+        cleanups = [call for call in calls if call[:2] == ["docker", "compose"] and "down" in call]
+        self.assertEqual(len(cleanups), 1)
+        project = project_labels.get("project", "")
+        self.assertRegex(project, r"^ngrt-[0-9a-f]{16}$")
+        inspections = [call for call in calls if call[:2] == ["docker", "inspect"]]
+        self.assertEqual(len(inspections), 1)
+        self.assertEqual(cleanups[0][cleanups[0].index("--project-name") + 1], project)
+        self.assertIn("--volumes", cleanups[0])
+        self.assertLess(calls.index(inspections[0]), calls.index(cleanups[0]))
 
 
 if __name__ == "__main__":
