@@ -334,7 +334,7 @@ volumes:
             self.assertEqual(body["service"], expected_service)
 
     def test_signed_rustfs_presigned_put_get_preserves_encoded_path_host_and_query(self) -> None:
-        key = "folder/space name+literal@tag%2Fsegment"
+        key = "folder/space?name+literal@tag%2Fsegment"
         put_url = self._presigned_url(key, "PUT", "")
         put = self._signed_request(put_url, "PUT", self.small_payload)
         self.assertEqual(
@@ -352,7 +352,7 @@ volumes:
 
     def test_rustfs_accepts_sigv4_for_encoded_key_before_proxying(self) -> None:
         url = self._presigned_url(
-            "direct/encoded@key+part", "PUT", "", port=9000, scheme="http"
+            "direct/encoded?key+part", "PUT", "", port=9000, scheme="http"
         )
         result = self._signed_request(
             url, "PUT", self.small_payload, destination="rustfs:9000"
