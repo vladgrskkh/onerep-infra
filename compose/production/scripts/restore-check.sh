@@ -42,13 +42,11 @@ fi
 
 COMPOSE=(docker compose --project-name "$PROJECT" -f "$COMPOSE_FILE")
 [[ -z "$ENV_FILE" ]] || COMPOSE+=(--env-file "$ENV_FILE")
-RESTORE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/onerep-restore-check.XXXXXXXX")
-chmod 0700 "$RESTORE_ROOT"
-TOKEN=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
-[[ "$TOKEN" =~ ^[0-9a-f]{16}$ ]] || fail 'could not create a valid disposable container identity'
-CONTAINER="onerep-restore-check-$TOKEN"
+RESTORE_ROOT=
+TOKEN=
+CONTAINER=
 CONTAINER_STARTED=0
-DB_PASSWORD=$(openssl rand -hex 32) || fail 'could not generate an isolated database password'
+DB_PASSWORD=
 
 cleanup() {
     local status=$?
@@ -71,10 +69,17 @@ cleanup() {
     fi
     exit "$status"
 }
+
+RESTORE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/onerep-restore-check.XXXXXXXX")
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+chmod 0700 "$RESTORE_ROOT"
+TOKEN=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+[[ "$TOKEN" =~ ^[0-9a-f]{16}$ ]] || fail 'could not create a valid disposable container identity'
+CONTAINER="onerep-restore-check-$TOKEN"
+DB_PASSWORD=$(openssl rand -hex 32) || fail 'could not generate an isolated database password'
 
 RESTIC=("${COMPOSE[@]}" --profile backup run --rm --no-deps \
     --user "$(id -u):$(id -g)" -e RESTIC_CACHE_DIR=/tmp/restic-cache --volume "$RESTORE_ROOT:/restore")
