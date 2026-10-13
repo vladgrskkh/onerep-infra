@@ -132,6 +132,38 @@ services:
     restart: "no"
     logging: *bounded-logging
 
+  migrate-auth-status:
+    image: ghcr.io/vladgrskkh/onerep-auth:${AUTH_IMAGE_TAG:?Set AUTH_IMAGE_TAG}
+    profiles: [deploy]
+    entrypoint: ["/usr/local/bin/goose"]
+    command:
+      - -dir
+      - /migrations
+      - postgres
+      - postgres://auth_app:${AUTH_DATABASE_PASSWORD}@postgres:5432/auth_db?sslmode=disable
+      - status
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *bounded-logging
+
+  migrate-gym-status:
+    image: ghcr.io/vladgrskkh/onerep-api:${GYM_API_IMAGE_TAG:?Set GYM_API_IMAGE_TAG}
+    profiles: [deploy]
+    entrypoint: ["/usr/local/bin/goose"]
+    command:
+      - -dir
+      - /migrations
+      - postgres
+      - postgres://gym_app:${GYM_DATABASE_PASSWORD}@postgres:5432/gym_db?sslmode=disable
+      - status
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *bounded-logging
+
   auth:
     image: ghcr.io/vladgrskkh/onerep-auth:${AUTH_IMAGE_TAG:?Set AUTH_IMAGE_TAG}
     environment:

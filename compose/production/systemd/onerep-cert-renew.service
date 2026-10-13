@@ -1,0 +1,17 @@
+[Unit]
+Description=Renew the OneRep TLS certificate
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/onerep
+ExecStart=/opt/onerep/compose/production/scripts/renew-cert.sh --env-file /opt/onerep/.env
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/docker

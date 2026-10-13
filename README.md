@@ -29,6 +29,33 @@ Validate the file and Compose model before starting services:
 docker compose --env-file .env -f compose/production/compose.yaml config --quiet
 ```
 
+## Manually deploy from GitHub
+
+The `.github/workflows/deploy-production.yml` workflow runs only through **Actions → deploy production → Run workflow**. It asks for immutable auth and gym API commit tags and uses the protected GitHub Environment named `production`; configure required reviewers there before enabling production credentials. Application pushes and pull requests never deploy.
+
+Add these GitHub Environment secrets:
+
+- `POSTGRES_ADMIN_PASSWORD`, `AUTH_DATABASE_PASSWORD`, `GYM_DATABASE_PASSWORD`, and `REDIS_PASSWORD`
+- `AUTH_JWT_PRIVATE_KEY`
+- `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY`
+- `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BACKUP_ACCESS_KEY`, and `S3_BACKUP_SECRET_KEY`
+- `RESTIC_REPOSITORY` and `RESTIC_PASSWORD`
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for the offsite Restic S3 provider
+- `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_PRIVATE_KEY`, and `DEPLOY_KNOWN_HOSTS`
+- `GHCR_PULL_TOKEN`, a read-only GitHub Container Registry token for the private application images
+
+Add `CERTBOT_EMAIL` and `AWS_DEFAULT_REGION` as non-secret Environment variables. Set the region to `us-east-1`. The fixed S3 bucket and internal/public service endpoints are supplied by the workflow.
+
+Generate one stable RSA key for auth and store its complete PEM in `AUTH_JWT_PRIVATE_KEY`:
+
+```sh
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out jwt-private.pem
+```
+
+Do not regenerate the key for routine deployments; existing tokens and clients depend on it. For an S3-compatible offsite backup provider, put its endpoint directly in `RESTIC_REPOSITORY`, for example `s3:https://endpoint.example/bucket/path`. Do not rely on an `AWS_ENDPOINT_URL` override.
+
+The workflow renders a private `.env` with mode `0600`, transfers the tracked Compose bundle and environment over SSH, sends the GHCR token through SSH standard input, and removes its temporary server-side Docker credential directory as soon as image pulling finishes. The deployment script then performs migrations, health checks, first-certificate bootstrap when needed, and starts TLS NGINX.
+
 ## First deployment
 
 Start the private data services and wait for their health checks:
@@ -78,12 +105,17 @@ docker system df
 
 Every long-running service has a health check, restart policy, and bounded `json-file` logs (10 MB per file, three files). RustFS uses stdout-only application logging with an empty log directory and empty OTLP endpoints; its stdout and stderr are captured by Docker's rotating log driver. Watch both Docker storage and the host filesystem, especially PostgreSQL, RustFS, and backup staging. Avoid automatic prune commands: they can remove image layers needed for rollback.
 
-Renew certificates with the `certbot` service on an operator schedule. After a renewal, reload NGINX so it reads the new certificate:
+Install and enable the included daily renewal timer once after the first deployment:
 
 ```sh
-docker compose --profile certificate --env-file .env -f compose/production/compose.yaml run --rm certbot
-docker compose --profile production --env-file .env -f compose/production/compose.yaml exec nginx nginx -s reload
+sudo install -m 0644 compose/production/systemd/onerep-cert-renew.service /etc/systemd/system/
+sudo install -m 0644 compose/production/systemd/onerep-cert-renew.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now onerep-cert-renew.timer
+systemctl list-timers onerep-cert-renew.timer
 ```
+
+The renewal script compares the active certificate fingerprint before and after Certbot runs and reloads production NGINX only when the certificate changes.
 
 ## Image updates and rollback
 

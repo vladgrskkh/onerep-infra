@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily OneRep TLS certificate renewal
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+Unit=onerep-cert-renew.service
+
+[Install]
+WantedBy=timers.target

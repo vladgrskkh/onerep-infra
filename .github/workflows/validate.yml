@@ -23,13 +23,23 @@ jobs:
           docker run --rm -v "$PWD:/work:ro" -w /work
           docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
           .github/workflows/validate.yml
+          .github/workflows/deploy-production.yml
 
       - name: Lint shell scripts
         run: >-
           docker run --rm -v "$PWD:/mnt:ro" -w /mnt
           docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
           compose/production/scripts/bootstrap-rustfs.sh
+          compose/production/scripts/bootstrap-cert.sh
+          compose/production/scripts/deploy.sh
+          compose/production/scripts/renew-cert.sh
           compose/production/postgres/init/01-create-service-databases.sh
+
+      - name: Compile environment renderer
+        run: python3 -m py_compile compose/production/scripts/render-env.py
+
+      - name: Run environment renderer and deployment ordering tests
+        run: python3 -m unittest discover -s compose/production/scripts -p 'test_*.py' -v
 
       - name: Check NGINX bootstrap configuration
         run: >-

@@ -1,0 +1,135 @@
+name: deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      AUTH_IMAGE_TAG:
+        description: Immutable auth image commit tag
+        required: true
+        type: string
+      GYM_API_IMAGE_TAG:
+        description: Immutable gym API image commit tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Check out infrastructure bundle
+        uses: actions/checkout@v4
+
+      - name: Validate immutable image tags
+        env:
+          AUTH_IMAGE_TAG: ${{ inputs.AUTH_IMAGE_TAG }}
+          GYM_API_IMAGE_TAG: ${{ inputs.GYM_API_IMAGE_TAG }}
+        run: |
+          set -euo pipefail
+          [[ "$AUTH_IMAGE_TAG" =~ ^[0-9a-f]{7,40}$ ]]
+          [[ "$GYM_API_IMAGE_TAG" =~ ^[0-9a-f]{7,40}$ ]]
+
+      - name: Render private Compose environment
+        env:
+          AUTH_IMAGE_TAG: ${{ inputs.AUTH_IMAGE_TAG }}
+          GYM_API_IMAGE_TAG: ${{ inputs.GYM_API_IMAGE_TAG }}
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          AUTH_DATABASE_PASSWORD: ${{ secrets.AUTH_DATABASE_PASSWORD }}
+          GYM_DATABASE_PASSWORD: ${{ secrets.GYM_DATABASE_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          AUTH_JWT_PRIVATE_KEY: ${{ secrets.AUTH_JWT_PRIVATE_KEY }}
+          CERTBOT_EMAIL: ${{ vars.CERTBOT_EMAIL }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.RUSTFS_SECRET_KEY }}
+          S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+          S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+          S3_BACKUP_ACCESS_KEY: ${{ secrets.S3_BACKUP_ACCESS_KEY }}
+          S3_BACKUP_SECRET_KEY: ${{ secrets.S3_BACKUP_SECRET_KEY }}
+          S3_BUCKET: gym-media
+          S3_ENDPOINT: http://rustfs:9000
+          S3_PUBLIC_ENDPOINT: https://onerep.mooo.com
+          AUTH_BASE_URL: http://auth:8080
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+          RESTIC_REPOSITORY: ${{ secrets.RESTIC_REPOSITORY }}
+          RESTIC_PASSWORD: ${{ secrets.RESTIC_PASSWORD }}
+          RESTIC_CACHE_DIR: /root/.cache/restic
+          RESTIC_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          RESTIC_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          python3 compose/production/scripts/render-env.py \
+            --output "$RUNNER_TEMP/onerep.env" \
+            --var AUTH_IMAGE_TAG \
+            --var GYM_API_IMAGE_TAG \
+            --var POSTGRES_ADMIN_PASSWORD \
+            --var AUTH_DATABASE_PASSWORD \
+            --var GYM_DATABASE_PASSWORD \
+            --var REDIS_PASSWORD \
+            --var AUTH_JWT_PRIVATE_KEY \
+            --var CERTBOT_EMAIL \
+            --var RUSTFS_ACCESS_KEY \
+            --var RUSTFS_SECRET_KEY \
+            --var S3_ACCESS_KEY \
+            --var S3_SECRET_KEY \
+            --var S3_BACKUP_ACCESS_KEY \
+            --var S3_BACKUP_SECRET_KEY \
+            --var S3_BUCKET \
+            --var S3_ENDPOINT \
+            --var S3_PUBLIC_ENDPOINT \
+            --var AUTH_BASE_URL \
+            --var AWS_DEFAULT_REGION \
+            --var RESTIC_REPOSITORY \
+            --var RESTIC_PASSWORD \
+            --var RESTIC_CACHE_DIR \
+            --var RESTIC_S3_ACCESS_KEY \
+            --var RESTIC_S3_SECRET_KEY
+
+      - name: Install SSH credentials
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          printf '%s' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/onerep-deploy-key"
+          chmod 600 "$RUNNER_TEMP/onerep-deploy-key"
+
+      - name: Transfer tracked infrastructure bundle and environment
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          SSH=(ssh -i "$RUNNER_TEMP/onerep-deploy-key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
+          TARGET="$DEPLOY_USER@$DEPLOY_HOST"
+          git archive --format=tar HEAD compose/production README.md .env.example |
+            "${SSH[@]}" "$TARGET" 'mkdir -p /opt/onerep && tar -xf - -C /opt/onerep'
+          scp -i "$RUNNER_TEMP/onerep-deploy-key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$RUNNER_TEMP/onerep.env" "$TARGET:/opt/onerep/.env"
+          "${SSH[@]}" "$TARGET" 'chmod 600 /opt/onerep/.env'
+
+      - name: Pull private images with temporary GHCR credentials
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          GHCR_PULL_USERNAME: ${{ github.actor }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          TARGET="$DEPLOY_USER@$DEPLOY_HOST"
+          printf '%s\n%s\n' "$GHCR_PULL_USERNAME" "$GHCR_PULL_TOKEN" |
+            ssh -i "$RUNNER_TEMP/onerep-deploy-key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              "$TARGET" 'set -eu; umask 077; DOCKER_CONFIG=$(mktemp -d /tmp/onerep-docker-config.XXXXXX); export DOCKER_CONFIG; cleanup() { rm -f "$DOCKER_CONFIG/config.json"; rmdir "$DOCKER_CONFIG"; }; trap cleanup EXIT; IFS= read -r GHCR_PULL_USERNAME; IFS= read -r GHCR_PULL_TOKEN; printf "%s" "$GHCR_PULL_TOKEN" | docker login ghcr.io --username "$GHCR_PULL_USERNAME" --password-stdin >/dev/null; unset GHCR_PULL_TOKEN; cd /opt/onerep; docker compose --project-name onerep --env-file /opt/onerep/.env -f compose/production/compose.yaml pull postgres redis rustfs auth gym-api nginx certbot; rm -f "$DOCKER_CONFIG/config.json"; rmdir "$DOCKER_CONFIG"; trap - EXIT'
+          unset GHCR_PULL_TOKEN
+
+      - name: Deploy services
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i "$RUNNER_TEMP/onerep-deploy-key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            '/opt/onerep/compose/production/scripts/deploy.sh --env-file /opt/onerep/.env --skip-pull'
